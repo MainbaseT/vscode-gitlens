@@ -5,7 +5,8 @@ import type { Container } from '../container';
 import { CommitFormatter } from '../git/formatters/commitFormatter';
 import type { PullRequest } from '../git/models/pullRequest';
 import { detailsMessage } from '../hovers/hovers';
-import { configuration } from '../system/configuration';
+import { configuration } from '../system/-webview/configuration';
+import { isTrackableTextEditor } from '../system/-webview/vscode';
 import { debug, log } from '../system/decorators/log';
 import { once } from '../system/event';
 import { debounce } from '../system/function';
@@ -13,7 +14,6 @@ import { Logger } from '../system/logger';
 import { getLogScope, setLogScopeExit } from '../system/logger.scope';
 import type { MaybePausedResult } from '../system/promise';
 import { getSettledValue, pauseOnCancelOrTimeoutMap } from '../system/promise';
-import { isTextEditor } from '../system/utils';
 import type { LinesChangeEvent, LineState } from '../trackers/lineTracker';
 import { getInlineDecoration } from './annotations';
 import type { BlameFontOptions } from './gutterBlameAnnotationProvider';
@@ -44,7 +44,7 @@ export class LineAnnotationController implements Disposable {
 		);
 	}
 
-	dispose() {
+	dispose(): void {
 		this.clearAnnotations(this._editor);
 
 		this.container.lineTracker.unsubscribe(this);
@@ -72,12 +72,12 @@ export class LineAnnotationController implements Disposable {
 	}
 
 	private _suspended: boolean = false;
-	get suspended() {
+	get suspended(): boolean {
 		return !this._enabled || this._suspended;
 	}
 
 	@log()
-	resume() {
+	resume(): boolean {
 		this.setLineTracker(true);
 
 		if (this._suspended) {
@@ -89,7 +89,7 @@ export class LineAnnotationController implements Disposable {
 	}
 
 	@log()
-	suspend() {
+	suspend(): boolean {
 		this.setLineTracker(false);
 
 		if (!this._suspended) {
@@ -123,7 +123,7 @@ export class LineAnnotationController implements Disposable {
 	}
 
 	@debug({ args: false, singleLine: true })
-	clear(editor: TextEditor | undefined) {
+	clear(editor: TextEditor | undefined): void {
 		this._cancellation?.cancel();
 		if (this._editor !== editor && this._editor != null) {
 			this.clearAnnotations(this._editor);
@@ -132,7 +132,7 @@ export class LineAnnotationController implements Disposable {
 	}
 
 	@log({ args: false })
-	async toggle(editor: TextEditor | undefined) {
+	async toggle(editor: TextEditor | undefined): Promise<void> {
 		this._enabled = !(this._enabled && !this.suspended);
 
 		if (this._enabled) {
@@ -157,7 +157,7 @@ export class LineAnnotationController implements Disposable {
 		const prs = new Map<string, Promise<PullRequest | undefined>>();
 		if (lines.size === 0) return prs;
 
-		const remotePromise = this.container.git.getBestRemoteWithIntegration(repoPath);
+		const remotePromise = this.container.git.remotes(repoPath).getBestRemoteWithIntegration();
 
 		for (const [, state] of lines) {
 			if (state.commit.isUncommitted) continue;
@@ -172,14 +172,14 @@ export class LineAnnotationController implements Disposable {
 		return prs;
 	}
 
-	@debug({ args: false })
+	@debug()
 	private async refresh(editor: TextEditor | undefined) {
 		if (editor == null && this._editor == null) return;
 
 		const scope = getLogScope();
 
 		const selections = this.container.lineTracker.selections;
-		if (editor == null || selections == null || !isTextEditor(editor)) {
+		if (editor == null || selections == null || !isTrackableTextEditor(editor)) {
 			setLogScopeExit(
 				scope,
 				` ${GlyphChars.Dot} Skipped because there is no valid editor or no valid selections`,
@@ -205,14 +205,14 @@ export class LineAnnotationController implements Disposable {
 		}
 
 		const trackedDocument = await this.container.documentTracker.getOrAdd(editor.document);
-		if (!trackedDocument.isBlameable && this.suspended) {
-			if (scope != null) {
-				scope.exitDetails = ` ${GlyphChars.Dot} Skipped because the ${
-					this.suspended
-						? 'controller is suspended'
-						: `document(${trackedDocument.uri.toString(true)}) is not blameable`
-				}`;
-			}
+		const status = await trackedDocument?.getStatus();
+		if (!status?.blameable && this.suspended) {
+			setLogScopeExit(
+				scope,
+				` ${GlyphChars.Dot} Skipped because the ${
+					this.suspended ? 'controller is suspended' : 'document is not blameable'
+				}`,
+			);
 
 			this.clear(editor);
 			return;
@@ -220,23 +220,21 @@ export class LineAnnotationController implements Disposable {
 
 		// Make sure the editor hasn't died since the await above and that we are still on the same line(s)
 		if (editor.document == null || !this.container.lineTracker.includes(selections)) {
-			if (scope != null) {
-				scope.exitDetails = ` ${GlyphChars.Dot} Skipped because the ${
+			setLogScopeExit(
+				scope,
+				` ${GlyphChars.Dot} Skipped because the ${
 					editor.document == null
 						? 'editor is gone'
-						: `selection(s)=${selections
-								.map(s => `[${s.anchor}-${s.active}]`)
-								.join()} are no longer current`
-				}`;
-			}
+						: `selection=${selections.map(s => `[${s.anchor}-${s.active}]`).join()} are no longer current`
+				}`,
+			);
 			return;
 		}
 
-		if (scope != null) {
-			scope.exitDetails = ` ${GlyphChars.Dot} selection(s)=${selections
-				.map(s => `[${s.anchor}-${s.active}]`)
-				.join()}`;
-		}
+		setLogScopeExit(
+			scope,
+			` ${GlyphChars.Dot} selection=${selections.map(s => `[${s.anchor}-${s.active}]`).join()}`,
+		);
 
 		let uncommittedOnly = true;
 
@@ -290,7 +288,7 @@ export class LineAnnotationController implements Disposable {
 		const cancellation = this._cancellation.token;
 
 		const getBranchAndTagTipsPromise = CommitFormatter.has(cfg.format, 'tips')
-			? this.container.git.getBranchesAndTagsTipsFn(repoPath)
+			? this.container.git.getBranchesAndTagsTipsLookup(repoPath)
 			: undefined;
 
 		async function updateDecorations(

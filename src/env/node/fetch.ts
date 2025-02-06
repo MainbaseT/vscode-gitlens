@@ -2,7 +2,7 @@ import * as process from 'process';
 import * as url from 'url';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import fetch from 'node-fetch';
-import { configuration } from '../../system/configuration';
+import { configuration } from '../../system/-webview/configuration';
 import { Logger } from '../../system/logger';
 
 export { fetch };

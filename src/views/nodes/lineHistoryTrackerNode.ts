@@ -1,13 +1,14 @@
-import type { Selection } from 'vscode';
+import type { Disposable, Selection } from 'vscode';
 import { TreeItem, TreeItemCollapsibleState, window } from 'vscode';
 import type { GitCommitish } from '../../git/gitUri';
 import { GitUri, unknownGitUri } from '../../git/gitUri';
-import { deletedOrMissing } from '../../git/models/constants';
-import { isBranchReference, isSha } from '../../git/models/reference';
+import { deletedOrMissing } from '../../git/models/revision';
+import { isBranchReference } from '../../git/utils/reference.utils';
+import { isSha } from '../../git/utils/revision.utils';
 import { showReferencePicker } from '../../quickpicks/referencePicker';
+import { setContext } from '../../system/-webview/context';
 import { UriComparer } from '../../system/comparers';
-import { setContext } from '../../system/context';
-import { gate } from '../../system/decorators/gate';
+import { gate } from '../../system/decorators/-webview/gate';
 import { debug, log } from '../../system/decorators/log';
 import { weakEvent } from '../../system/event';
 import { debounce } from '../../system/function';
@@ -34,7 +35,7 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 		super('line-history-tracker', unknownGitUri, view);
 	}
 
-	override dispose() {
+	override dispose(): void {
 		super.dispose();
 		this.child = undefined;
 	}
@@ -59,7 +60,10 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 				return [];
 			}
 
-			if (this._selection == null) {
+			const selection = this._selection;
+			const editorContents = this._editorContents;
+
+			if (selection == null) {
 				this.view.description = undefined;
 
 				this.view.message = 'There was no selection provided for line history.';
@@ -82,15 +86,11 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 
 			let branch;
 			if (!commitish.sha || commitish.sha === 'HEAD') {
-				branch = await this.view.container.git.getBranch(this.uri.repoPath);
+				branch = await this.view.container.git.branches(commitish.repoPath).getBranch();
 			} else if (!isSha(commitish.sha)) {
-				({
-					values: [branch],
-				} = await this.view.container.git.getBranches(this.uri.repoPath, {
-					filter: b => b.name === commitish.sha,
-				}));
+				branch = await this.view.container.git.branches(commitish.repoPath).getBranch(commitish.sha);
 			}
-			this.child = new LineHistoryNode(fileUri, this.view, this, branch, this._selection, this._editorContents);
+			this.child = new LineHistoryNode(fileUri, this.view, this, branch, selection, editorContents);
 		}
 
 		return this.child.getChildren();
@@ -112,12 +112,12 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 	}
 
 	get hasUri(): boolean {
-		return this._uri != unknownGitUri && this._uri.repoPath != null;
+		return this._uri !== unknownGitUri && this._uri.repoPath != null;
 	}
 
 	@gate()
 	@log()
-	async changeBase() {
+	async changeBase(): Promise<void> {
 		const pick = await showReferencePicker(
 			this.uri.repoPath!,
 			'Change Line History Base',
@@ -131,7 +131,7 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 		if (pick == null) return;
 
 		if (isBranchReference(pick)) {
-			const branch = await this.view.container.git.getBranch(this.uri.repoPath);
+			const branch = await this.view.container.git.branches(this.uri.repoPath!).getBranch();
 			this._base = branch?.name === pick.name ? undefined : pick.ref;
 		} else {
 			this._base = pick.ref;
@@ -144,7 +144,7 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 
 	@gate()
 	@debug({ exit: true })
-	override async refresh(reset: boolean = false) {
+	override async refresh(reset: boolean = false): Promise<boolean> {
 		const scope = getLogScope();
 
 		if (!this.canSubscribe) return false;
@@ -215,12 +215,12 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 	}
 
 	@log()
-	setEditorFollowing(enabled: boolean) {
+	setEditorFollowing(enabled: boolean): void {
 		this.canSubscribe = enabled;
 	}
 
 	@debug()
-	protected subscribe() {
+	protected subscribe(): Disposable | undefined {
 		if (this.view.container.lineTracker.subscribed(this)) return undefined;
 
 		const onActiveLinesChanged = debounce(this.onActiveLinesChanged.bind(this), 250);
@@ -255,7 +255,7 @@ export class LineHistoryTrackerNode extends SubscribeableViewNode<
 		void this.triggerChange();
 	}
 
-	setUri(uri?: GitUri) {
+	setUri(uri?: GitUri): void {
 		this._uri = uri ?? unknownGitUri;
 		void setContext('gitlens:views:fileHistory:canPin', this.hasUri);
 	}

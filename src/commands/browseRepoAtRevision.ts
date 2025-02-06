@@ -1,14 +1,15 @@
 import type { TextEditor, Uri } from 'vscode';
-import { Commands } from '../constants';
+import { GlCommand } from '../constants.commands';
 import type { Container } from '../container';
 import { GitUri } from '../git/gitUri';
 import { showGenericErrorMessage } from '../messages';
-import { command, executeCoreCommand } from '../system/command';
+import { command, executeCoreCommand } from '../system/-webview/command';
+import { openWorkspace } from '../system/-webview/vscode';
 import { Logger } from '../system/logger';
 import { basename } from '../system/path';
-import { openWorkspace } from '../system/utils';
-import type { CommandContext } from './base';
-import { ActiveEditorCommand, getCommandUri } from './base';
+import { ActiveEditorCommand } from './commandBase';
+import { getCommandUri } from './commandBase.utils';
+import type { CommandContext } from './commandContext';
 
 export interface BrowseRepoAtRevisionCommandArgs {
 	uri?: Uri;
@@ -21,30 +22,30 @@ export interface BrowseRepoAtRevisionCommandArgs {
 export class BrowseRepoAtRevisionCommand extends ActiveEditorCommand {
 	constructor(private readonly container: Container) {
 		super([
-			Commands.BrowseRepoAtRevision,
-			Commands.BrowseRepoAtRevisionInNewWindow,
-			Commands.BrowseRepoBeforeRevision,
-			Commands.BrowseRepoBeforeRevisionInNewWindow,
+			GlCommand.BrowseRepoAtRevision,
+			GlCommand.BrowseRepoAtRevisionInNewWindow,
+			GlCommand.BrowseRepoBeforeRevision,
+			GlCommand.BrowseRepoBeforeRevisionInNewWindow,
 		]);
 	}
 
-	protected override preExecute(context: CommandContext, args?: BrowseRepoAtRevisionCommandArgs) {
+	protected override preExecute(context: CommandContext, args?: BrowseRepoAtRevisionCommandArgs): Promise<void> {
 		switch (context.command) {
-			case Commands.BrowseRepoAtRevisionInNewWindow:
+			case GlCommand.BrowseRepoAtRevisionInNewWindow:
 				args = { ...args, before: false, openInNewWindow: true };
 				break;
-			case Commands.BrowseRepoBeforeRevision:
+			case GlCommand.BrowseRepoBeforeRevision:
 				args = { ...args, before: true, openInNewWindow: false };
 				break;
-			case Commands.BrowseRepoBeforeRevisionInNewWindow:
+			case GlCommand.BrowseRepoBeforeRevisionInNewWindow:
 				args = { ...args, before: true, openInNewWindow: true };
 				break;
 		}
 
-		return this.execute(context.editor!, context.uri, args);
+		return this.execute(context.editor, context.uri, args);
 	}
 
-	async execute(editor: TextEditor, uri?: Uri, args?: BrowseRepoAtRevisionCommandArgs) {
+	async execute(editor: TextEditor | undefined, uri?: Uri, args?: BrowseRepoAtRevisionCommandArgs): Promise<void> {
 		args = { ...args };
 
 		try {

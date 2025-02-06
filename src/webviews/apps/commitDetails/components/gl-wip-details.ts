@@ -1,12 +1,15 @@
 import { Avatar, defineGkElement } from '@gitkraken/shared-web-components';
+import type { PropertyValueMap } from 'lit';
 import { css, html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { when } from 'lit/directives/when.js';
+import { equalsIgnoreCase } from '../../../../system/string';
 import type { DraftState, State, Wip } from '../../../commitDetails/protocol';
 import type { TreeItemAction, TreeItemBase } from '../../shared/components/tree/base';
 import type { File } from './gl-details-base';
 import { GlDetailsBase } from './gl-details-base';
+import type { GenerateState } from './gl-inspect-patch';
 import '../../shared/components/button';
 import '../../shared/components/code-icon';
 import '../../shared/components/panes/pane-group';
@@ -33,21 +36,24 @@ export class GlWipDetails extends GlDetailsBase {
 	@property({ type: Object })
 	draftState?: DraftState;
 
+	@property({ type: Object })
+	generate?: GenerateState;
+
 	@state()
-	get inReview() {
+	get inReview(): boolean {
 		return this.draftState?.inReview ?? false;
 	}
 
-	get isUnpublished() {
+	get isUnpublished(): boolean {
 		const branch = this.wip?.branch;
 		return branch?.upstream == null || branch.upstream.missing === true;
 	}
 
-	get draftsEnabled() {
+	get draftsEnabled(): boolean {
 		return this.orgSettings?.drafts === true;
 	}
 
-	get filesCount() {
+	get filesCount(): number {
 		return this.files?.length ?? 0;
 	}
 
@@ -60,6 +66,12 @@ export class GlWipDetails extends GlDetailsBase {
 			behind: branch.tracking?.behind ?? 0,
 		};
 	}
+
+	@state()
+	patchCreateMetadata: { title: string | undefined; description: string | undefined } = {
+		title: undefined,
+		description: undefined,
+	};
 
 	get patchCreateState() {
 		const wip = this.wip!;
@@ -76,8 +88,7 @@ export class GlWipDetails extends GlDetailsBase {
 		};
 
 		return {
-			title: undefined,
-			description: undefined,
+			...this.patchCreateMetadata,
 			changes: {
 				[key]: change,
 			},
@@ -97,17 +108,28 @@ export class GlWipDetails extends GlDetailsBase {
 		defineGkElement(Avatar);
 	}
 
-	override get filesChangedPaneLabel() {
+	protected override updated(changedProperties: PropertyValueMap<any> | Map<PropertyKey, unknown>): void {
+		super.updated(changedProperties);
+
+		if (changedProperties.has('generate')) {
+			this.patchCreateMetadata = {
+				title: this.generate?.title ?? this.patchCreateMetadata.title,
+				description: this.generate?.description ?? this.patchCreateMetadata.description,
+			};
+		}
+	}
+
+	override get filesChangedPaneLabel(): string {
 		return 'Working Changes';
 	}
 
-	renderSecondaryAction() {
+	private renderSecondaryAction() {
 		if (!this.draftsEnabled || this.inReview) return undefined;
 
 		let label = 'Share as Cloud Patch';
 		let action = 'create-patch';
 		const pr = this.wip?.pullRequest;
-		if (pr != null && pr.state === 'opened') {
+		if (pr != null && pr.state === 'opened' && equalsIgnoreCase(pr.provider.domain, 'github.com')) {
 			// const isMe = pr.author.name.endsWith('(you)');
 			// if (isMe) {
 			// 	label = 'Share with PR Participants';
@@ -162,7 +184,7 @@ export class GlWipDetails extends GlDetailsBase {
 		</p>`;
 	}
 
-	renderPrimaryAction() {
+	private renderPrimaryAction() {
 		const canShare = this.draftsEnabled;
 		if (this.isUnpublished && canShare) {
 			return html`<p class="button-container">
@@ -184,7 +206,7 @@ export class GlWipDetails extends GlDetailsBase {
 		if (ahead === 0 && behind === 0) return undefined;
 
 		const fetchLabel = behind > 0 ? 'Pull' : ahead > 0 ? 'Push' : 'Fetch';
-		const fetchIcon = behind > 0 ? 'gl-repo-pull' : ahead > 0 ? 'gl-repo-push' : 'gl-repo-fetch';
+		const fetchIcon = behind > 0 ? 'repo-pull' : ahead > 0 ? 'repo-push' : 'repo-fetch';
 
 		return html`<p class="button-container">
 			<span class="button-group button-group--single">
@@ -200,7 +222,7 @@ export class GlWipDetails extends GlDetailsBase {
 		</p>`;
 	}
 
-	renderActions() {
+	private renderActions() {
 		const primaryAction = this.renderPrimaryAction();
 		const secondaryAction = this.renderSecondaryAction();
 		if (primaryAction == null && secondaryAction == null) return nothing;
@@ -208,7 +230,7 @@ export class GlWipDetails extends GlDetailsBase {
 		return html`<div class="section section--actions">${primaryAction}${secondaryAction}</div>`;
 	}
 
-	renderSuggestedChanges() {
+	private renderSuggestedChanges() {
 		if (this.codeSuggestions.length === 0) return nothing;
 		// src="${this.issue!.author.avatarUrl}"
 		// title="${this.issue!.author.name} (author)"
@@ -243,7 +265,7 @@ export class GlWipDetails extends GlDetailsBase {
 		`;
 	}
 
-	renderPullRequest() {
+	private renderPullRequest() {
 		if (this.wip?.pullRequest == null) return nothing;
 
 		return html`
@@ -257,7 +279,7 @@ export class GlWipDetails extends GlDetailsBase {
 				<action-nav slot="actions">
 					<action-item
 						label="Open Pull Request Changes"
-						icon="gl-diff-multiple"
+						icon="diff-multiple"
 						@click=${() => this.onDataActionClick('open-pr-changes')}
 					></action-item>
 					<action-item
@@ -289,7 +311,7 @@ export class GlWipDetails extends GlDetailsBase {
 		`;
 	}
 
-	renderIncomingOutgoing() {
+	private renderIncomingOutgoing() {
 		if (this.branchState == null || (this.branchState.ahead === 0 && this.branchState.behind === 0)) return nothing;
 
 		return html`
@@ -311,12 +333,13 @@ export class GlWipDetails extends GlDetailsBase {
 		`;
 	}
 
-	renderPatchCreation() {
+	private renderPatchCreation() {
 		if (!this.inReview) return nothing;
 
 		return html`<gl-inspect-patch
 			.orgSettings=${this.orgSettings}
 			.preferences=${this.preferences}
+			.generate=${this.generate}
 			.createState=${this.patchCreateState}
 			@gl-patch-create-patch=${(e: CustomEvent) => {
 				// this.onDataActionClick('create-patch');
@@ -326,7 +349,7 @@ export class GlWipDetails extends GlDetailsBase {
 		></gl-inspect-patch>`;
 	}
 
-	override render() {
+	override render(): unknown {
 		if (this.wip == null) return nothing;
 
 		return html`
@@ -350,15 +373,15 @@ export class GlWipDetails extends GlDetailsBase {
 		return [openFile, { icon: 'plus', label: 'Stage changes', action: 'file-stage' }];
 	}
 
-	onDataActionClick(name: string) {
+	private onDataActionClick(name: string) {
 		void this.dispatchEvent(new CustomEvent('data-action', { detail: { name: name } }));
 	}
 
-	onToggleReviewMode(inReview: boolean) {
+	private onToggleReviewMode(inReview: boolean) {
 		this.dispatchEvent(new CustomEvent('draft-state-changed', { detail: { inReview: inReview } }));
 	}
 
-	onShowCodeSuggestion(id: string) {
+	private onShowCodeSuggestion(id: string) {
 		this.dispatchEvent(new CustomEvent('gl-show-code-suggestion', { detail: { id: id } }));
 	}
 }

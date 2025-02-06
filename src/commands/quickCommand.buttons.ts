@@ -30,7 +30,7 @@ export class ToggleQuickInputButton implements QuickInputButton {
 		return this.getToggledState().tooltip;
 	}
 
-	get on() {
+	get on(): boolean {
 		return this._on;
 	}
 	set on(value: boolean) {
@@ -62,13 +62,18 @@ export const ClearQuickInputButton: QuickInputButton = {
 	tooltip: 'Clear',
 };
 
+export const ConnectIntegrationButton: QuickInputButton = {
+	iconPath: new ThemeIcon('plug'),
+	tooltip: 'Connect Additional Integrations',
+};
+
 export const FeedbackQuickInputButton: QuickInputButton = {
 	iconPath: new ThemeIcon('feedback'),
 	tooltip: 'Give Us Feedback',
 };
 
 export const FetchQuickInputButton: QuickInputButton = {
-	iconPath: new ThemeIcon('gitlens-repo-fetch'),
+	iconPath: new ThemeIcon('repo-fetch'),
 	tooltip: 'Fetch',
 };
 
@@ -117,9 +122,19 @@ export const PickCommitToggleQuickInputButton = class extends ToggleQuickInputBu
 	}
 };
 
+export const LearnAboutProQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('info'),
+	tooltip: 'Learn about GitLens Pro',
+};
+
 export const MergeQuickInputButton: QuickInputButton = {
 	iconPath: new ThemeIcon('merge'),
 	tooltip: 'Merge...',
+};
+
+export const OpenOnJiraQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('globe'),
+	tooltip: 'Open on Jira',
 };
 
 export const OpenOnGitHubQuickInputButton: QuickInputButton = {
@@ -127,14 +142,19 @@ export const OpenOnGitHubQuickInputButton: QuickInputButton = {
 	tooltip: 'Open on GitHub',
 };
 
+export const OpenOnGitLabQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('globe'),
+	tooltip: 'Open on GitLab',
+};
+
+export const OpenOnAzureDevOpsQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('globe'),
+	tooltip: 'Open on Azure DevOps',
+};
+
 export const OpenOnWebQuickInputButton: QuickInputButton = {
 	iconPath: new ThemeIcon('globe'),
 	tooltip: 'Open on gitkraken.dev',
-};
-
-export const OpenInEditorQuickInputButton: QuickInputButton = {
-	iconPath: new ThemeIcon('link-external'),
-	tooltip: 'Open in Editor',
 };
 
 export const LaunchpadSettingsQuickInputButton: QuickInputButton = {
@@ -183,7 +203,7 @@ export const SetRemoteAsDefaultQuickInputButton: QuickInputButton = {
 
 export const ShowDetailsViewQuickInputButton: QuickInputButton = {
 	iconPath: new ThemeIcon('eye'),
-	tooltip: 'Open Details',
+	tooltip: 'Inspect Details',
 };
 
 export const OpenChangesViewQuickInputButton: QuickInputButton = {
@@ -194,6 +214,11 @@ export const OpenChangesViewQuickInputButton: QuickInputButton = {
 export const ShowResultsInSideBarQuickInputButton: QuickInputButton = {
 	iconPath: new ThemeIcon('link-external'),
 	tooltip: 'Show Results in Side Bar',
+};
+
+export const OpenWorktreeInNewWindowQuickInputButton: QuickInputButton = {
+	iconPath: new ThemeIcon('empty-window'),
+	tooltip: 'Open in Worktree',
 };
 
 export const ShowTagsToggleQuickInputButton = class extends SelectableQuickInputButton {

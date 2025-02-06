@@ -8,7 +8,9 @@ import type {
 	Tag,
 } from '@gitkraken/gitkraken-components';
 import type { GitBranch } from './branch';
+import type { GitStashCommit } from './commit';
 import type { GitRemote } from './remote';
+import type { GitWorktree } from './worktree';
 
 export type GitGraphHostingServiceType = HostingServiceType;
 
@@ -47,6 +49,10 @@ export interface GitGraph {
 	readonly branches: Map<string, GitBranch>;
 	readonly remotes: Map<string, GitRemote>;
 	readonly downstreams: Map<string, string[]>;
+	readonly stashes: Map<string, GitStashCommit> | undefined;
+	readonly worktrees: GitWorktree[] | undefined;
+	readonly worktreesByBranch: Map<string, GitWorktree> | undefined;
+
 	/** The rows for the set of commits requested */
 	readonly rows: GitGraphRow[];
 	readonly id?: string;

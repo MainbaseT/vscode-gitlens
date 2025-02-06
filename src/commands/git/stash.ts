@@ -6,18 +6,17 @@ import { reveal, showDetailsView } from '../../git/actions/stash';
 import { StashApplyError, StashApplyErrorReason, StashPushError, StashPushErrorReason } from '../../git/errors';
 import type { GitStashCommit } from '../../git/models/commit';
 import type { GitStashReference } from '../../git/models/reference';
-import { getReferenceLabel } from '../../git/models/reference';
 import type { Repository } from '../../git/models/repository';
+import { getReferenceLabel } from '../../git/utils/reference.utils';
 import { showGenericErrorMessage } from '../../messages';
 import type { QuickPickItemOfT } from '../../quickpicks/items/common';
 import type { FlagsQuickPickItem } from '../../quickpicks/items/flags';
 import { createFlagsQuickPickItem } from '../../quickpicks/items/flags';
-import { getContext } from '../../system/context';
-import { formatPath } from '../../system/formatPath';
+import { getContext } from '../../system/-webview/context';
+import { formatPath } from '../../system/-webview/formatPath';
 import { Logger } from '../../system/logger';
 import { pad } from '../../system/string';
 import type { ViewsWithRepositoryFolders } from '../../views/viewBase';
-import { getSteps } from '../gitCommands.utils';
 import type {
 	AsyncStepResultGenerator,
 	PartialStepState,
@@ -39,6 +38,7 @@ import {
 } from '../quickCommand';
 import { RevealInSideBarQuickInputButton, ShowDetailsViewQuickInputButton } from '../quickCommand.buttons';
 import { appendReposToTitle, pickRepositoryStep, pickStashesStep, pickStashStep } from '../quickCommand.steps';
+import { getSteps } from '../quickWizard.utils';
 
 interface Context {
 	repos: Repository[];
@@ -180,18 +180,18 @@ export class StashGitCommand extends QuickCommand<State> {
 		return this.subcommand === 'drop' ? false : super.canSkipConfirm;
 	}
 
-	override get skipConfirmKey() {
+	override get skipConfirmKey(): string {
 		return `${this.key}${this.subcommand == null ? '' : `-${this.subcommand}`}:${this.pickedVia}`;
 	}
 
 	protected async *steps(state: PartialStepState<State>): StepGenerator {
 		const context: Context = {
 			repos: this.container.git.openRepositories,
-			associatedView: this.container.stashesView,
+			associatedView: this.container.views.stashes,
 			readonly:
-				getContext<boolean>('gitlens:readonly', false) ||
-				getContext<boolean>('gitlens:untrusted', false) ||
-				getContext<boolean>('gitlens:hasVirtualFolders', false),
+				getContext('gitlens:readonly', false) ||
+				getContext('gitlens:untrusted', false) ||
+				getContext('gitlens:hasVirtualFolders', false),
 			title: this.title,
 		};
 
@@ -322,8 +322,8 @@ export class StashGitCommand extends QuickCommand<State> {
 		while (this.canStepsContinue(state)) {
 			if (state.counter < 3 || state.reference == null) {
 				const result: StepResult<GitStashReference> = yield* pickStashStep(state, context, {
-					stash: await this.container.git.getStash(state.repo.path),
-					placeholder: (context, stash) =>
+					gitStash: await state.repo.git.stash()?.getStash(),
+					placeholder: (_context, stash) =>
 						stash == null
 							? `No stashes found in ${state.repo.formattedName}`
 							: 'Choose a stash to apply to your working tree',
@@ -345,7 +345,7 @@ export class StashGitCommand extends QuickCommand<State> {
 			endSteps(state);
 
 			try {
-				await state.repo.stashApply(
+				await state.repo.git.stash()?.applyStash(
 					// pop can only take a stash index, e.g. `stash@{1}`
 					state.subcommand === 'pop' ? `stash@{${state.reference.number}}` : state.reference.ref,
 					{ deleteAfter: state.subcommand === 'pop' },
@@ -404,7 +404,7 @@ export class StashGitCommand extends QuickCommand<State> {
 			{
 				placeholder: `Confirm ${context.title}`,
 				additionalButtons: [ShowDetailsViewQuickInputButton, RevealInSideBarQuickInputButton],
-				onDidClickButton: (quickpick, button) => {
+				onDidClickButton: (_quickpick, button) => {
 					if (button === ShowDetailsViewQuickInputButton) {
 						void showDetailsView(state.reference, {
 							pin: false,
@@ -427,8 +427,8 @@ export class StashGitCommand extends QuickCommand<State> {
 		while (this.canStepsContinue(state)) {
 			if (state.counter < 3 || !state.references?.length) {
 				const result: StepResult<GitStashReference[]> = yield* pickStashesStep(state, context, {
-					stash: await this.container.git.getStash(state.repo.path),
-					placeholder: (context, stash) =>
+					gitStash: await state.repo.git.stash()?.getStash(),
+					placeholder: (_context, stash) =>
 						stash == null ? `No stashes found in ${state.repo.formattedName}` : 'Choose stashes to delete',
 					picked: state.references?.map(r => r.ref),
 				});
@@ -447,7 +447,7 @@ export class StashGitCommand extends QuickCommand<State> {
 			for (const ref of state.references) {
 				try {
 					// drop can only take a stash index, e.g. `stash@{1}`
-					await state.repo.stashDelete(`stash@{${ref.number}}`, ref.ref);
+					await state.repo.git.stash()?.deleteStash(`stash@{${ref.number}}`, ref.ref);
 				} catch (ex) {
 					Logger.error(ex, context.title);
 
@@ -481,8 +481,8 @@ export class StashGitCommand extends QuickCommand<State> {
 		while (this.canStepsContinue(state)) {
 			if (state.counter < 3 || state.reference == null) {
 				const result: StepResult<GitStashCommit> = yield* pickStashStep(state, context, {
-					stash: await this.container.git.getStash(state.repo.path),
-					placeholder: (context, stash) =>
+					gitStash: await state.repo.git.stash()?.getStash(),
+					placeholder: (_context, stash) =>
 						stash == null ? `No stashes found in ${state.repo.formattedName}` : 'Choose a stash',
 					picked: state.reference?.ref,
 				});
@@ -515,6 +515,8 @@ export class StashGitCommand extends QuickCommand<State> {
 			state.flags = [];
 		}
 
+		let confirmOverride;
+
 		while (this.canStepsContinue(state)) {
 			if (state.counter < 3 || state.message == null) {
 				if (state.message == null) {
@@ -529,7 +531,7 @@ export class StashGitCommand extends QuickCommand<State> {
 				state.message = result;
 			}
 
-			if (this.confirm(state.confirm)) {
+			if (this.confirm(confirmOverride ?? state.confirm)) {
 				const result = yield* this.pushCommandConfirmStep(state, context);
 				if (result === StepResultBreak) continue;
 
@@ -538,9 +540,9 @@ export class StashGitCommand extends QuickCommand<State> {
 
 			try {
 				if (state.flags.includes('--snapshot')) {
-					await state.repo.stashSaveSnapshot(state.message);
+					await state.repo.git.stash()?.saveSnapshot(state.message);
 				} else {
-					await state.repo.stashSave(state.message, state.uris, {
+					await state.repo.git.stash()?.saveStash(state.message, state.uris, {
 						includeUntracked: state.flags.includes('--include-untracked'),
 						keepIndex: state.flags.includes('--keep-index'),
 						onlyStaged: state.flags.includes('--staged'),
@@ -554,6 +556,7 @@ export class StashGitCommand extends QuickCommand<State> {
 				if (ex instanceof StashPushError) {
 					if (ex.reason === StashPushErrorReason.NothingToSave) {
 						if (!state.flags.includes('--include-untracked')) {
+							confirmOverride = true;
 							void window.showWarningMessage(
 								'No changes to stash. Choose the "Push & Include Untracked" option, if you have untracked files.',
 							);
@@ -716,8 +719,8 @@ export class StashGitCommand extends QuickCommand<State> {
 		while (this.canStepsContinue(state)) {
 			if (state.counter < 3 || state.reference == null) {
 				const result: StepResult<GitStashReference> = yield* pickStashStep(state, context, {
-					stash: await this.container.git.getStash(state.repo.path),
-					placeholder: (context, stash) =>
+					gitStash: await state.repo.git.stash()?.getStash(),
+					placeholder: (_context, stash) =>
 						stash == null ? `No stashes found in ${state.repo.formattedName}` : 'Choose a stash to rename',
 					picked: state.reference?.ref,
 				});
@@ -742,12 +745,9 @@ export class StashGitCommand extends QuickCommand<State> {
 			endSteps(state);
 
 			try {
-				await state.repo.stashRename(
-					state.reference.name,
-					state.reference.ref,
-					state.message,
-					state.reference.stashOnRef,
-				);
+				await state.repo.git
+					.stash()
+					?.renameStash(state.reference.name, state.reference.ref, state.message, state.reference.stashOnRef);
 			} catch (ex) {
 				Logger.error(ex, context.title);
 				void showGenericErrorMessage(ex.message);
@@ -788,7 +788,7 @@ export class StashGitCommand extends QuickCommand<State> {
 			{
 				placeholder: `Confirm ${context.title}`,
 				additionalButtons: [ShowDetailsViewQuickInputButton, RevealInSideBarQuickInputButton],
-				onDidClickButton: (quickpick, button) => {
+				onDidClickButton: (_quickpick, button) => {
 					if (button === ShowDetailsViewQuickInputButton) {
 						void showDetailsView(state.reference, {
 							pin: false,

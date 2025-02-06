@@ -61,7 +61,7 @@ export class GlStatusNav extends LitElement {
 			}
 
 			.md-code {
-				background: rgba(255, 255, 255, 0.05);
+				background: var(--vscode-textCodeBlock-background);
 				border-radius: 3px;
 				padding: 0px 4px 2px 4px;
 				font-family: var(--vscode-editor-font-family);
@@ -75,7 +75,7 @@ export class GlStatusNav extends LitElement {
 	@property({ type: Object })
 	preferences?: State['preferences'];
 
-	override render() {
+	override render(): unknown {
 		if (this.wip == null) return nothing;
 
 		const changes = this.wip.changes;
@@ -140,13 +140,13 @@ export class GlStatusNav extends LitElement {
 			<div class="group">
 				<gl-tooltip hoist content="Fetch">
 					<a href="#" class="commit-action" @click=${(e: MouseEvent) => this.handleAction(e, 'fetch')}
-						><code-icon icon="gl-repo-fetch"></code-icon></a
+						><code-icon icon="repo-fetch"></code-icon></a
 				></gl-tooltip>
 			</div>
 		`;
 	}
 
-	handleAction(e: MouseEvent, action: string) {
+	private handleAction(e: MouseEvent, action: string) {
 		const altKey = e instanceof MouseEvent ? e.altKey : false;
 		this.dispatchEvent(
 			new CustomEvent(`gl-branch-action`, {
