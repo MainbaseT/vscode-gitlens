@@ -1,30 +1,33 @@
 import type { TemplateResult } from 'lit';
 import { css, html, LitElement, nothing, unsafeCSS } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import type { Source } from '../../../../constants';
-import { Commands } from '../../../../constants';
-import type { Subscription } from '../../../../plus/gk/account/subscription';
+import type { GlCommands } from '../../../../constants.commands';
+import { GlCommand } from '../../../../constants.commands';
+import { proTrialLengthInDays, SubscriptionPlanId, SubscriptionState } from '../../../../constants.subscription';
+import type { Source } from '../../../../constants.telemetry';
+import type { Promo } from '../../../../plus/gk/models/promo';
+import type { Subscription } from '../../../../plus/gk/models/subscription';
+import { getApplicablePromo } from '../../../../plus/gk/utils/promo.utils';
 import {
 	getSubscriptionPlanName,
 	getSubscriptionTimeRemaining,
 	isSubscriptionPaid,
 	isSubscriptionStateTrial,
-	SubscriptionPlanId,
-	SubscriptionState,
-} from '../../../../plus/gk/account/subscription';
+} from '../../../../plus/gk/utils/subscription.utils';
 import { pluralize } from '../../../../system/string';
 import type { GlPopover } from './overlays/popover';
 import { focusOutline } from './styles/lit/a11y.css';
 import { elementBase, linkBase } from './styles/lit/base.css';
 import './overlays/popover';
 import './overlays/tooltip';
+import './promo';
 
 declare global {
 	interface HTMLElementTagNameMap {
 		'gl-feature-badge': GlFeatureBadge;
 	}
 
-	interface GlobalEventHandlersEventMap {}
+	// interface GlobalEventHandlersEventMap {}
 }
 
 @customElement('gl-feature-badge')
@@ -116,14 +119,7 @@ export class GlFeatureBadge extends LitElement {
 			}
 
 			.popup-content .actions gl-button:not(:first-child) {
-				margin-top: 0.6rem;
-			}
-
-			.popup-content .actions .special {
-				font-size: smaller;
 				margin-top: 0.8rem;
-				opacity: 0.6;
-				text-align: center;
 			}
 
 			.hint {
@@ -157,7 +153,7 @@ export class GlFeatureBadge extends LitElement {
 		return this.subscription?.state;
 	}
 
-	override render() {
+	override render(): unknown {
 		return html`
 			<gl-popover placement=${this.placement} hoist>
 				<span slot="anchor" class="badge" tabindex="0">${this.renderBadge()}</span>
@@ -181,13 +177,11 @@ export class GlFeatureBadge extends LitElement {
 			}
 		}
 
-		return this.cloud ? html`${text}<span class="badge-icon">☁️</span>` : text;
+		return text;
 	}
 
 	private renderPopoverHeader() {
-		const text = html`<span class="popup-title"
-			>${this.preview ? 'Preview feature' : 'Pro feature'}${this.cloud ? ' ☁️' : ''}</span
-		>`;
+		const text = html`<span class="popup-title">${this.preview ? 'Preview feature' : 'Pro feature'}</span>`;
 
 		if (this.state === SubscriptionState.Paid) {
 			return html`<div class="popup-header">${text}</div>`;
@@ -197,24 +191,24 @@ export class GlFeatureBadge extends LitElement {
 			if (this.preview) {
 				return html`<div class="popup-header">
 					${text}<span class="popup-subtitle"
-						>Requires an account and may require a paid plan in the future</span
+						>Requires an account and may require GitLens Pro in the future</span
 					>
 				</div>`;
 			}
 
 			return html`<div class="popup-header">
-				${text}<span class="popup-subtitle"> Requires a paid plan</span>
+				${text}<span class="popup-subtitle"> Requires GitLens Pro</span>
 			</div>`;
 		}
 
 		if (this.preview) {
 			return html`<div class="popup-header">
-				${text}<span class="popup-subtitle">May require a paid plan in the future</span>
+				${text}<span class="popup-subtitle">May require GitLens Pro in the future</span>
 			</div>`;
 		}
 
 		return html`<div class="popup-header">
-			${text}<span class="popup-subtitle"> Requires a paid plan for use on privately-hosted repos</span>
+			${text}<span class="popup-subtitle"> Requires GitLens Pro for use on privately-hosted repos</span>
 		</div>`;
 	}
 
@@ -227,7 +221,7 @@ export class GlFeatureBadge extends LitElement {
 				content = html`<p>
 					Your
 					<gl-tooltip hoist content="Show Account view">
-						<a href="${generateCommandLink(Commands.ShowAccountView, undefined)}"
+						<a href="${generateCommandLink(GlCommand.ShowAccountView, undefined)}"
 							>${getSubscriptionPlanName(this.subscription?.plan.actual.id ?? SubscriptionPlanId.Pro)}</a
 						>
 					</gl-tooltip>
@@ -241,19 +235,19 @@ export class GlFeatureBadge extends LitElement {
 						<gl-button
 							appearance="primary"
 							density="tight"
-							href="${generateCommandLink(Commands.PlusResendVerification, this.source)}"
+							href="${generateCommandLink(GlCommand.PlusResendVerification, this.source)}"
 							>Resend Email</gl-button
 						>
 						<gl-button
 							appearance="secondary"
 							density="tight"
-							href="${generateCommandLink(Commands.PlusValidate, this.source)}"
+							href="${generateCommandLink(GlCommand.PlusValidate, this.source)}"
 							><code-icon icon="refresh"></code-icon
 						></gl-button>
 					</div>`;
 				break;
 
-			case SubscriptionState.FreePlusInTrial: {
+			case SubscriptionState.ProTrial: {
 				const days = this.daysRemaining;
 
 				content = html`<p>
@@ -266,29 +260,33 @@ export class GlFeatureBadge extends LitElement {
 				break;
 			}
 
-			case SubscriptionState.FreePlusTrialExpired:
+			case SubscriptionState.ProTrialExpired:
 				content = html`<p>
-						Your Pro trial as ended. You can now only use Pro features on publicly-hosted repos.
+						Your Pro trial has ended. You can now only use Pro features on publicly-hosted repos.
 					</p>
-					${this.renderUpgradeActions(html`<p>Please upgrade for full access to Pro features:</p>`)}`;
+					${this.renderUpgradeActions(
+						html`<p>Please upgrade for full access to all GitLens Pro features:</p>`,
+					)}`;
 				break;
 
-			case SubscriptionState.FreePlusTrialReactivationEligible:
+			case SubscriptionState.ProTrialReactivationEligible:
 				content = html`<p>
-						Reactivate your Pro trial and experience all the new Pro features — free for another 7 days!
+						Reactivate your Pro trial and experience all the new Pro features — free for another
+						${pluralize('day', proTrialLengthInDays)}!
 					</p>
 					<div class="actions center">
 						<gl-button
 							appearance="primary"
 							density="tight"
-							href="${generateCommandLink(Commands.PlusReactivateProTrial, this.source)}"
+							href="${generateCommandLink(GlCommand.PlusReactivateProTrial, this.source)}"
+							tooltip="Reactivate your Pro trial for another ${pluralize('day', proTrialLengthInDays)}"
 							>Reactivate Pro Trial</gl-button
 						>
 					</div>`;
 				break;
 
 			default:
-				if (!this.cloud && this.state === SubscriptionState.FreeInPreviewTrial) {
+				if (!this.cloud && this.state === SubscriptionState.ProPreview) {
 					const days = this.daysRemaining;
 
 					content = html`<p>
@@ -324,27 +322,33 @@ export class GlFeatureBadge extends LitElement {
 			<gl-button
 				appearance="primary"
 				density="tight"
-				href="${generateCommandLink(Commands.PlusSignUp, this.source)}"
-				>Start 7-day Pro Trial</gl-button
+				href="${generateCommandLink(GlCommand.PlusSignUp, this.source)}"
+				>Start ${proTrialLengthInDays}-day Pro Trial</gl-button
 			>
-			&nbsp;or <a href="${generateCommandLink(Commands.PlusLogin, this.source)}" title="Sign In">sign in</a>
+			&nbsp;or <a href="${generateCommandLink(GlCommand.PlusLogin, this.source)}" title="Sign In">sign in</a>
 		</div>`;
 	}
 
 	private renderUpgradeActions(leadin?: TemplateResult) {
+		const promo = getApplicablePromo(this.state, 'badge');
+
 		return html`<div class="actions">
 			${leadin ?? nothing}
 			<gl-button
 				appearance="primary"
 				density="tight"
-				href="${generateCommandLink(Commands.PlusUpgrade, this.source)}"
+				href="${generateCommandLink(GlCommand.PlusUpgrade, this.source)}"
 				>Upgrade to Pro</gl-button
 			>
-			<p class="special">Special: <b>50% off first seat of Pro</b> — only $4/month!<br /></p>
+			${this.renderPromo(promo)}
 		</div>`;
+	}
+
+	private renderPromo(promo: Promo | undefined) {
+		return html`<gl-promo .promo=${promo} .source=${this.source}></gl-promo>`;
 	}
 }
 
-function generateCommandLink(command: Commands, source: Source | undefined) {
+function generateCommandLink(command: GlCommands, source: Source | undefined) {
 	return `command:${command}${source ? `?${encodeURIComponent(JSON.stringify(source))}` : ''}`;
 }

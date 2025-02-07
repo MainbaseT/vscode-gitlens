@@ -1,15 +1,15 @@
-import { Commands } from '../constants';
+import { GlCommand } from '../constants.commands';
 import type { Container } from '../container';
-import { command } from '../system/command';
-import { Command } from './base';
+import { command } from '../system/-webview/command';
+import { GlCommandBase } from './commandBase';
 
 @command()
-export class SwitchAIModelCommand extends Command {
+export class SwitchAIModelCommand extends GlCommandBase {
 	constructor(private readonly container: Container) {
-		super(Commands.SwitchAIModel);
+		super(GlCommand.SwitchAIModel);
 	}
 
-	async execute() {
+	async execute(): Promise<void> {
 		await (await this.container.ai)?.switchModel();
 	}
 }
