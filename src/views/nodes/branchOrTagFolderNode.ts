@@ -38,7 +38,7 @@ export class BranchOrTagFolderNode extends ViewNode<'branch-tag-folder'> {
 		for (const folder of this.root.children.values()) {
 			if (folder.value === undefined) {
 				// If the folder contains the current branch, expand it by default
-				const expand = folder.descendants?.some(n => n.is('branch') && (n.current || n.opened));
+				const expand = folder.descendants?.some(n => n.is('branch') && (n.current || n.worktree?.opened));
 				children.push(
 					new BranchOrTagFolderNode(
 						this.view,
@@ -68,7 +68,7 @@ export class BranchOrTagFolderNode extends ViewNode<'branch-tag-folder'> {
 			this._expand ? TreeItemCollapsibleState.Expanded : TreeItemCollapsibleState.Collapsed,
 		);
 		item.id = this.id;
-		item.contextValue = ContextValues.Folder;
+		item.contextValue = ContextValues.BranchOrTagFolder;
 		item.iconPath = ThemeIcon.Folder;
 		item.tooltip = this.label;
 		return item;

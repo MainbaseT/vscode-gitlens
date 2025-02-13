@@ -1,10 +1,10 @@
 import type { ConfigurationChangeEvent, Disposable } from 'vscode';
 import type { LineHistoryViewConfig } from '../config';
-import { Commands } from '../constants';
+import { GlCommand } from '../constants.commands';
 import type { Container } from '../container';
-import { executeCommand } from '../system/command';
-import { configuration } from '../system/configuration';
-import { setContext } from '../system/context';
+import { executeCommand } from '../system/-webview/command';
+import { configuration } from '../system/-webview/configuration';
+import { setContext } from '../system/-webview/context';
 import { LineHistoryTrackerNode } from './nodes/lineHistoryTrackerNode';
 import { ViewBase } from './viewBase';
 import { registerViewCommand } from './viewCommands';
@@ -28,17 +28,15 @@ export class LineHistoryView extends ViewBase<'lineHistory', LineHistoryTrackerN
 		return false;
 	}
 
-	protected getRoot() {
+	protected getRoot(): LineHistoryTrackerNode {
 		return new LineHistoryTrackerNode(this);
 	}
 
 	protected registerCommands(): Disposable[] {
-		void this.container.viewCommands;
-
 		return [
 			registerViewCommand(
 				this.getQualifiedCommand('copy'),
-				() => executeCommand(Commands.ViewsCopy, this.activeSelection, this.selection),
+				() => executeCommand(GlCommand.ViewsCopy, this.activeSelection, this.selection),
 				this,
 			),
 			registerViewCommand(this.getQualifiedCommand('refresh'), () => this.refresh(true), this),
@@ -58,7 +56,7 @@ export class LineHistoryView extends ViewBase<'lineHistory', LineHistoryTrackerN
 		];
 	}
 
-	protected override filterConfigurationChanged(e: ConfigurationChangeEvent) {
+	protected override filterConfigurationChanged(e: ConfigurationChangeEvent): boolean {
 		const changed = super.filterConfigurationChanged(e);
 		if (
 			!changed &&
@@ -90,7 +88,7 @@ export class LineHistoryView extends ViewBase<'lineHistory', LineHistoryTrackerN
 
 		if (this.description?.endsWith(pinnedSuffix)) {
 			if (enabled) {
-				this.description = this.description.substr(0, this.description.length - pinnedSuffix.length);
+				this.description = this.description.substring(0, this.description.length - pinnedSuffix.length);
 			}
 		} else if (!enabled && this.description != null) {
 			this.description += pinnedSuffix;

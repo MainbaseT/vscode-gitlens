@@ -7,6 +7,7 @@ import { first, flatMap, groupByMap, map, union } from '../../../../../system/it
 import { capitalize, pluralize } from '../../../../../system/string';
 import { GlElement, observe } from '../../../shared/components/element';
 import { formatDate, formatNumeric, fromNow } from '../../../shared/date';
+import '../../../shared/components/overlays/tooltip';
 
 export interface BranchMarker {
 	type: 'branch';
@@ -32,7 +33,13 @@ export interface TagMarker {
 	current?: undefined;
 }
 
-export type GraphMinimapMarker = BranchMarker | RemoteMarker | StashMarker | TagMarker;
+export interface PullRequestMarker {
+	type: 'pull-request';
+	name: string;
+	current?: undefined;
+}
+
+export type GraphMinimapMarker = BranchMarker | RemoteMarker | StashMarker | TagMarker | PullRequestMarker;
 
 export interface GraphMinimapSearchResultMarker {
 	type: 'search-result';
@@ -61,6 +68,7 @@ const markerZOrder = [
 	'marker-head-arrow-right',
 	'marker-head',
 	'marker-upstream',
+	'marker-pull-request',
 	'marker-branch',
 	'marker-stash',
 	'marker-remote',
@@ -243,6 +251,16 @@ export class GlGraphMinimap extends GlElement {
 		.bb-region.marker-upstream > rect {
 			width: 1px;
 			height: 100%;
+		}
+
+		.bb-region.marker-pull-request {
+			fill: var(--color-graph-minimap-marker-pull-requests);
+			stroke: var(--color-graph-minimap-marker-pull-requests);
+			transform: translate(-2px, 29px);
+		}
+		.bb-region.marker-pull-request > rect {
+			width: 3px;
+			height: 3px;
 		}
 
 		.bb-region.marker-branch {
@@ -433,6 +451,13 @@ export class GlGraphMinimap extends GlElement {
 			border: 1px solid var(--color-graph-minimap-tip-stashBorder);
 			color: var(--color-graph-minimap-tip-stashForeground);
 		}
+		.bb-tooltip .refs .pull-request {
+			border-radius: 3px;
+			padding: 0 4px;
+			background-color: var(--color-graph-minimap-pullRequestBackground);
+			border: 1px solid var(--color-graph-minimap-pullRequestBorder);
+			color: var(--color-graph-minimap-pullRequestForeground);
+		}
 		.bb-tooltip .refs .tag {
 			border-radius: 3px;
 			padding: 0 4px;
@@ -441,8 +466,13 @@ export class GlGraphMinimap extends GlElement {
 			color: var(--color-graph-minimap-tip-tagForeground);
 		}
 
-		.bb-event-rects {
+		.bb-event-rects,
+		.bb-event-rect {
 			cursor: pointer !important;
+		}
+		.bb-event-rects:active,
+		.bb-event-rect:active {
+			cursor: ew-resize !important;
 		}
 	`;
 
@@ -466,7 +496,7 @@ export class GlGraphMinimap extends GlElement {
 		this.select(this.activeDay);
 	}
 
-	@property({ type: Map })
+	@property({ type: Object })
 	data: Map<number, GraphMinimapStats | null> | undefined;
 
 	@property({ type: String })
@@ -477,7 +507,7 @@ export class GlGraphMinimap extends GlElement {
 		this.handleDataChanged(false);
 	}
 
-	@property({ type: Map })
+	@property({ type: Object })
 	markers: Map<number, GraphMinimapMarker[]> | undefined;
 
 	@observe('markers')
@@ -485,7 +515,7 @@ export class GlGraphMinimap extends GlElement {
 		this.handleDataChanged(true);
 	}
 
-	@property({ type: Map })
+	@property({ type: Object })
 	searchResults: Map<number, GraphMinimapSearchResultMarker> | undefined;
 
 	@observe('searchResults')
@@ -542,7 +572,7 @@ export class GlGraphMinimap extends GlElement {
 		}
 	}
 
-	select(date: number | Date | undefined, trackOnly: boolean = false) {
+	select(date: number | Date | undefined, trackOnly: boolean = false): void {
 		if (date == null) {
 			this.unselect();
 
@@ -565,7 +595,7 @@ export class GlGraphMinimap extends GlElement {
 		}
 	}
 
-	unselect(date?: number | Date, focus: boolean = false) {
+	unselect(date?: number | Date, focus: boolean = false): void {
 		if (focus) {
 			this.getInternalChart()?.hideGridFocus();
 
@@ -909,6 +939,7 @@ export class GlGraphMinimap extends GlElement {
 						}
 
 						const stashesCount = groups?.get('stash')?.length ?? 0;
+						const pullRequestsCount = groups?.get('pull-request')?.length ?? 0;
 
 						let commits;
 						let linesChanged;
@@ -964,6 +995,12 @@ export class GlGraphMinimap extends GlElement {
 								.join('') ?? ''
 						}</div>
 						<div class="refs">${
+							pullRequestsCount
+								? /*html*/ `<span class="pull-request">${pluralize('pull request', pullRequestsCount, {
+										plural: 'pull requests',
+								  })}</span>`
+								: ''
+						}${
 							groups
 								?.get('remote')
 								?.sort((a, b) => (a.current ? -1 : 1) - (b.current ? -1 : 1))
@@ -1038,16 +1075,18 @@ export class GlGraphMinimap extends GlElement {
 		this.onActiveDayChanged();
 	}
 
-	override render() {
+	override render(): unknown {
 		return html`
 			<div id="spinner"><code-icon icon="loading" modifier="spin"></code-icon></div>
 			<div id="chart"></div>
-			<div
-				class="legend"
-				title="${this.dataType === 'lines' ? 'Showing lines changed per day' : 'Showing commits per day'}"
-			>
-				<code-icon icon="${this.dataType === 'lines' ? 'request-changes' : 'git-commit'}"></code-icon>
-			</div>
+			<gl-tooltip>
+				<div class="legend">
+					<code-icon icon="${this.dataType === 'lines' ? 'request-changes' : 'git-commit'}"></code-icon>
+				</div>
+				<div slot="content">
+					${this.dataType === 'lines' ? 'Showing lines changed per day' : 'Showing commits per day'}
+				</div>
+			</gl-tooltip>
 		`;
 	}
 }

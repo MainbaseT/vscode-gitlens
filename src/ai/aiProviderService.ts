@@ -1,31 +1,48 @@
 import type { CancellationToken, Disposable, MessageItem, ProgressOptions, QuickInputButton } from 'vscode';
 import { env, ThemeIcon, Uri, window } from 'vscode';
-import type { AIModels, AIProviders, SupportedAIModels } from '../constants';
+import type { AIProviders, SupportedAIModels, VSCodeAIModels } from '../constants.ai';
+import type { AIGenerateDraftEventData, Sources, TelemetryEvents } from '../constants.telemetry';
 import type { Container } from '../container';
+import { CancellationError } from '../errors';
 import type { GitCommit } from '../git/models/commit';
-import { assertsCommitHasFullDetails, isCommit } from '../git/models/commit';
-import { uncommitted, uncommittedStaged } from '../git/models/constants';
+import { isCommit } from '../git/models/commit';
 import type { GitRevisionReference } from '../git/models/reference';
 import type { Repository } from '../git/models/repository';
-import { isRepository } from '../git/models/repository';
+import { uncommitted, uncommittedStaged } from '../git/models/revision';
+import { assertsCommitHasFullDetails } from '../git/utils/commit.utils';
 import { showAIModelPicker } from '../quickpicks/aiModelPicker';
-import { configuration } from '../system/configuration';
+import { configuration } from '../system/-webview/configuration';
+import type { Storage } from '../system/-webview/storage';
+import { supportedInVSCodeVersion } from '../system/-webview/vscode';
+import { formatNumeric } from '../system/date';
+import type { Lazy } from '../system/lazy';
+import type { Deferred } from '../system/promise';
 import { getSettledValue } from '../system/promise';
-import type { Storage } from '../system/storage';
-import { supportedInVSCodeVersion } from '../system/utils';
+import { getPossessiveForm } from '../system/string';
+import type { TelemetryService } from '../telemetry/telemetry';
 import { AnthropicProvider } from './anthropicProvider';
+import { DeepSeekProvider } from './deepSeekProvider';
 import { GeminiProvider } from './geminiProvider';
+import { GitHubModelsProvider } from './githubModelsProvider';
+import { HuggingFaceProvider } from './huggingFaceProvider';
 import { OpenAIProvider } from './openaiProvider';
-import type { VSCodeAIModels } from './vscodeProvider';
 import { isVSCodeAIModel, VSCodeAIProvider } from './vscodeProvider';
+import { xAIProvider } from './xaiProvider';
 
-export interface AIModel<
-	Provider extends AIProviders = AIProviders,
-	Model extends AIModels<Provider> = AIModels<Provider>,
-> {
+export interface AIResult {
+	summary: string;
+	body: string;
+}
+
+export interface AIGenerateChangelogChange {
+	message: string;
+	issues: { id: string; url: string; title: string | undefined }[];
+}
+
+export interface AIModel<Provider extends AIProviders = AIProviders, Model extends string = string> {
 	readonly id: Model;
 	readonly name: string;
-	readonly maxTokens: number;
+	readonly maxTokens: { input: number; output: number };
 	readonly provider: {
 		id: Provider;
 		name: string;
@@ -33,37 +50,62 @@ export interface AIModel<
 
 	readonly default?: boolean;
 	readonly hidden?: boolean;
+
+	readonly temperature?: number | null;
 }
 
 interface AIProviderConstructor<Provider extends AIProviders = AIProviders> {
 	new (container: Container): AIProvider<Provider>;
 }
 
+// Order matters for sorting the picker
 const _supportedProviderTypes = new Map<AIProviders, AIProviderConstructor>([
+	...(supportedInVSCodeVersion('language-models') ? [['vscode', VSCodeAIProvider]] : ([] as any)),
 	['openai', OpenAIProvider],
 	['anthropic', AnthropicProvider],
 	['gemini', GeminiProvider],
+	['deepseek', DeepSeekProvider],
+	['xai', xAIProvider],
+	['github', GitHubModelsProvider],
+	['huggingface', HuggingFaceProvider],
 ]);
-if (supportedInVSCodeVersion('language-models')) {
-	_supportedProviderTypes.set('vscode', VSCodeAIProvider);
-}
 
 export interface AIProvider<Provider extends AIProviders = AIProviders> extends Disposable {
 	readonly id: Provider;
 	readonly name: string;
 
-	getModels(): Promise<readonly AIModel<Provider, AIModels<Provider>>[]>;
+	getModels(): Promise<readonly AIModel<Provider>[]>;
 
 	explainChanges(
-		model: AIModel<Provider, AIModels<Provider>>,
+		model: AIModel<Provider>,
 		message: string,
 		diff: string,
+		reporting: TelemetryEvents['ai/explain'],
 		options?: { cancellation?: CancellationToken },
 	): Promise<string | undefined>;
 	generateCommitMessage(
-		model: AIModel<Provider, AIModels<Provider>>,
+		model: AIModel<Provider>,
 		diff: string,
+		reporting: TelemetryEvents['ai/generate'],
 		options?: { cancellation?: CancellationToken; context?: string },
+	): Promise<string | undefined>;
+	generateStashMessage(
+		model: AIModel<Provider>,
+		diff: string,
+		reporting: TelemetryEvents['ai/generate'],
+		options?: { cancellation?: CancellationToken; context?: string },
+	): Promise<string | undefined>;
+	generateDraftMessage(
+		model: AIModel<Provider>,
+		diff: string,
+		reporting: TelemetryEvents['ai/generate'],
+		options?: { cancellation?: CancellationToken; context?: string; codeSuggestion?: boolean },
+	): Promise<string | undefined>;
+	generateChangelog(
+		model: AIModel<Provider>,
+		changes: AIGenerateChangelogChange[],
+		reporting: TelemetryEvents['ai/generate'],
+		options?: { cancellation?: CancellationToken },
 	): Promise<string | undefined>;
 }
 
@@ -73,23 +115,23 @@ export class AIProviderService implements Disposable {
 
 	constructor(private readonly container: Container) {}
 
-	dispose() {
+	dispose(): void {
 		this._provider?.dispose();
 	}
 
-	get currentProviderId() {
+	get currentProviderId(): AIProviders | undefined {
 		return this._provider?.id;
 	}
 
-	private getConfiguredModel(): { provider: AIProviders; model: AIModels } | undefined {
-		const qualifiedModelId = configuration.get('ai.experimental.model') ?? undefined;
+	private getConfiguredModel(): { provider: AIProviders; model: string } | undefined {
+		const qualifiedModelId = configuration.get('ai.model') ?? undefined;
 		if (qualifiedModelId != null) {
-			let [providerId, modelId] = qualifiedModelId.split(':') as [AIProviders, AIModels];
+			let [providerId, modelId] = qualifiedModelId.split(':') as [AIProviders, string];
 			if (providerId != null && this.supports(providerId)) {
 				if (modelId != null) {
 					return { provider: providerId, model: modelId };
 				} else if (providerId === 'vscode') {
-					modelId = configuration.get('ai.experimental.vscode.model') as VSCodeAIModels;
+					modelId = configuration.get('ai.vscode.model') as VSCodeAIModels;
 					if (modelId != null) {
 						// Model ids are in the form of `vendor:family`
 						if (/^(.+):(.+)$/.test(modelId)) {
@@ -108,7 +150,7 @@ export class AIProviderService implements Disposable {
 		return models.flatMap(m => getSettledValue(m, []));
 	}
 
-	private async getModel(options?: { force?: boolean; silent?: boolean }): Promise<AIModel | undefined> {
+	async getModel(options?: { force?: boolean; silent?: boolean }): Promise<AIModel | undefined> {
 		const cfg = this.getConfiguredModel();
 		if (!options?.force && cfg?.provider != null && cfg?.model != null) {
 			const model = await this.getOrUpdateModel(cfg.provider, cfg.model);
@@ -124,10 +166,10 @@ export class AIProviderService implements Disposable {
 	}
 
 	private getOrUpdateModel(model: AIModel): Promise<AIModel | undefined>;
-	private getOrUpdateModel<T extends AIProviders>(providerId: T, modelId: AIModels<T>): Promise<AIModel | undefined>;
+	private getOrUpdateModel<T extends AIProviders>(providerId: T, modelId: string): Promise<AIModel | undefined>;
 	private async getOrUpdateModel(
 		modelOrProviderId: AIModel | AIProviders,
-		modelId?: AIModels,
+		modelId?: string,
 	): Promise<AIModel | undefined> {
 		let providerId: AIProviders;
 		let model: AIModel | undefined;
@@ -174,11 +216,11 @@ export class AIProviderService implements Disposable {
 
 		if (changed) {
 			if (isVSCodeAIModel(model)) {
-				await configuration.updateEffective(`ai.experimental.model`, 'vscode');
-				await configuration.updateEffective(`ai.experimental.vscode.model`, model.id);
+				await configuration.updateEffective(`ai.model`, 'vscode');
+				await configuration.updateEffective(`ai.vscode.model`, model.id);
 			} else {
 				await configuration.updateEffective(
-					`ai.experimental.model`,
+					`ai.model`,
 					`${model.provider.id}:${model.id}` as SupportedAIModels,
 				);
 			}
@@ -189,33 +231,337 @@ export class AIProviderService implements Disposable {
 	}
 
 	async generateCommitMessage(
-		changes: string[],
-		options?: { cancellation?: CancellationToken; context?: string; progress?: ProgressOptions },
-	): Promise<string | undefined>;
-	async generateCommitMessage(
-		repoPath: Uri,
-		options?: { cancellation?: CancellationToken; context?: string; progress?: ProgressOptions },
-	): Promise<string | undefined>;
-	async generateCommitMessage(
-		repository: Repository,
-		options?: { cancellation?: CancellationToken; context?: string; progress?: ProgressOptions },
-	): Promise<string | undefined>;
-	async generateCommitMessage(
-		changesOrRepoOrPath: string[] | Repository | Uri,
+		changesOrRepo: string | string[] | Repository,
+		sourceContext: { source: Sources },
+		options?: {
+			cancellation?: CancellationToken;
+			context?: string;
+			generating?: Deferred<AIModel>;
+			progress?: ProgressOptions;
+		},
+	): Promise<AIResult | undefined> {
+		const changes: string | undefined = await this.getChanges(changesOrRepo);
+		if (changes == null) return undefined;
+
+		const { confirmed, model } = await getModelAndConfirmAIProviderToS('diff', this, this.container.storage);
+		if (model == null) {
+			options?.generating?.cancel();
+			return undefined;
+		}
+
+		const payload: TelemetryEvents['ai/generate'] = {
+			type: 'commitMessage',
+			'model.id': model.id,
+			'model.provider.id': model.provider.id,
+			'model.provider.name': model.provider.name,
+			'retry.count': 0,
+		};
+		const source: Parameters<TelemetryService['sendEvent']>[2] = { source: sourceContext.source };
+
+		if (!confirmed) {
+			this.container.telemetry.sendEvent('ai/generate', { ...payload, 'failed.reason': 'user-declined' }, source);
+
+			options?.generating?.cancel();
+			return undefined;
+		}
+
+		if (options?.cancellation?.isCancellationRequested) {
+			this.container.telemetry.sendEvent(
+				'ai/generate',
+				{ ...payload, 'failed.reason': 'user-cancelled' },
+				source,
+			);
+
+			options?.generating?.cancel();
+			return undefined;
+		}
+
+		const promise = this._provider!.generateCommitMessage(model, changes, payload, {
+			cancellation: options?.cancellation,
+			context: options?.context,
+		});
+		options?.generating?.fulfill(model);
+
+		const start = Date.now();
+		try {
+			const result = await (options?.progress != null
+				? window.withProgress(
+						{ ...options.progress, title: `Generating commit message with ${model.name}...` },
+						() => promise,
+				  )
+				: promise);
+
+			payload['output.length'] = result?.length;
+			this.container.telemetry.sendEvent('ai/generate', { ...payload, duration: Date.now() - start }, source);
+
+			if (result == null) return undefined;
+			return parseResult(result);
+		} catch (ex) {
+			this.container.telemetry.sendEvent(
+				'ai/generate',
+				{
+					...payload,
+					duration: Date.now() - start,
+					...(ex instanceof CancellationError
+						? { 'failed.reason': 'user-cancelled' }
+						: { 'failed.reason': 'error', 'failed.error': String(ex) }),
+				},
+				source,
+			);
+
+			throw ex;
+		}
+	}
+
+	async generateDraftMessage(
+		changesOrRepo: string | string[] | Repository,
+		sourceContext: { source: Sources; type: AIGenerateDraftEventData['draftType'] },
+		options?: {
+			cancellation?: CancellationToken;
+			context?: string;
+			generating?: Deferred<AIModel>;
+			progress?: ProgressOptions;
+			codeSuggestion?: boolean;
+		},
+	): Promise<AIResult | undefined> {
+		const changes: string | undefined = await this.getChanges(changesOrRepo);
+		if (changes == null) return undefined;
+
+		const { confirmed, model } = await getModelAndConfirmAIProviderToS('diff', this, this.container.storage);
+		if (model == null) {
+			options?.generating?.cancel();
+			return undefined;
+		}
+
+		const payload: TelemetryEvents['ai/generate'] = {
+			type: 'draftMessage',
+			draftType: sourceContext.type,
+			'model.id': model.id,
+			'model.provider.id': model.provider.id,
+			'model.provider.name': model.provider.name,
+			'retry.count': 0,
+		};
+		const source: Parameters<TelemetryService['sendEvent']>[2] = { source: sourceContext.source };
+
+		if (!confirmed) {
+			this.container.telemetry.sendEvent('ai/generate', { ...payload, 'failed.reason': 'user-declined' }, source);
+
+			options?.generating?.cancel();
+			return undefined;
+		}
+
+		if (options?.cancellation?.isCancellationRequested) {
+			this.container.telemetry.sendEvent(
+				'ai/generate',
+				{ ...payload, 'failed.reason': 'user-cancelled' },
+				source,
+			);
+
+			options?.generating?.cancel();
+			return undefined;
+		}
+
+		const promise = this._provider!.generateDraftMessage(model, changes, payload, {
+			cancellation: options?.cancellation,
+			context: options?.context,
+			codeSuggestion: options?.codeSuggestion,
+		});
+		options?.generating?.fulfill(model);
+
+		const start = Date.now();
+		try {
+			const result = await (options?.progress != null
+				? window.withProgress(options.progress, () => promise)
+				: promise);
+
+			payload['output.length'] = result?.length;
+			this.container.telemetry.sendEvent('ai/generate', { ...payload, duration: Date.now() - start }, source);
+
+			if (result == null) return undefined;
+			return parseResult(result);
+		} catch (ex) {
+			this.container.telemetry.sendEvent(
+				'ai/generate',
+				{
+					...payload,
+					duration: Date.now() - start,
+					...(ex instanceof CancellationError
+						? { 'failed.reason': 'user-cancelled' }
+						: { 'failed.reason': 'error', 'failed.error': String(ex) }),
+				},
+				source,
+			);
+
+			throw ex;
+		}
+	}
+
+	async generateStashMessage(
+		changesOrRepo: string | string[] | Repository,
+		sourceContext: { source: Sources },
+		options?: {
+			cancellation?: CancellationToken;
+			context?: string;
+			generating?: Deferred<AIModel>;
+			progress?: ProgressOptions;
+		},
+	): Promise<AIResult | undefined> {
+		const changes: string | undefined = await this.getChanges(changesOrRepo);
+		if (changes == null) {
+			options?.generating?.cancel();
+			return undefined;
+		}
+
+		const { confirmed, model } = await getModelAndConfirmAIProviderToS('diff', this, this.container.storage);
+		if (model == null) {
+			options?.generating?.cancel();
+			return undefined;
+		}
+
+		const payload: TelemetryEvents['ai/generate'] = {
+			type: 'stashMessage',
+			'model.id': model.id,
+			'model.provider.id': model.provider.id,
+			'model.provider.name': model.provider.name,
+			'retry.count': 0,
+		};
+		const source: Parameters<TelemetryService['sendEvent']>[2] = { source: sourceContext.source };
+
+		if (!confirmed) {
+			this.container.telemetry.sendEvent('ai/generate', { ...payload, 'failed.reason': 'user-declined' }, source);
+
+			options?.generating?.cancel();
+			return undefined;
+		}
+
+		if (options?.cancellation?.isCancellationRequested) {
+			this.container.telemetry.sendEvent(
+				'ai/generate',
+				{ ...payload, 'failed.reason': 'user-cancelled' },
+				source,
+			);
+
+			options?.generating?.cancel();
+			return undefined;
+		}
+
+		const promise = this._provider!.generateStashMessage(model, changes, payload, {
+			cancellation: options?.cancellation,
+			context: options?.context,
+		});
+		options?.generating?.fulfill(model);
+
+		const start = Date.now();
+		try {
+			const result = await (options?.progress != null
+				? window.withProgress(
+						{ ...options.progress, title: `Generating stash message with ${model.name}...` },
+						() => promise,
+				  )
+				: promise);
+
+			payload['output.length'] = result?.length;
+			this.container.telemetry.sendEvent('ai/generate', { ...payload, duration: Date.now() - start }, source);
+
+			if (result == null) return undefined;
+			return parseResult(result);
+		} catch (ex) {
+			this.container.telemetry.sendEvent(
+				'ai/generate',
+				{
+					...payload,
+					duration: Date.now() - start,
+					...(ex instanceof CancellationError
+						? { 'failed.reason': 'user-cancelled' }
+						: { 'failed.reason': 'error', 'failed.error': String(ex) }),
+				},
+				source,
+			);
+
+			throw ex;
+		}
+	}
+
+	async generateChangelog(
+		changes: Lazy<Promise<AIGenerateChangelogChange[]>>,
+		sourceContext: { source: Sources },
+		options?: { cancellation?: CancellationToken; progress?: ProgressOptions },
+	): Promise<string | undefined> {
+		const { confirmed, model } = await getModelAndConfirmAIProviderToS('data', this, this.container.storage);
+		if (model == null) return undefined;
+
+		const payload: TelemetryEvents['ai/generate'] = {
+			type: 'changelog',
+			'model.id': model.id,
+			'model.provider.id': model.provider.id,
+			'model.provider.name': model.provider.name,
+			'retry.count': 0,
+		};
+		const source: Parameters<TelemetryService['sendEvent']>[2] = { source: sourceContext.source };
+
+		if (!confirmed) {
+			this.container.telemetry.sendEvent('ai/generate', { ...payload, 'failed.reason': 'user-declined' }, source);
+			return undefined;
+		}
+
+		if (options?.cancellation?.isCancellationRequested) {
+			this.container.telemetry.sendEvent(
+				'ai/generate',
+				{ ...payload, 'failed.reason': 'user-cancelled' },
+				source,
+			);
+			return undefined;
+		}
+
+		const promise = changes.value.then(changes =>
+			this._provider!.generateChangelog(model, changes, payload, {
+				cancellation: options?.cancellation,
+			}),
+		);
+
+		const start = Date.now();
+		try {
+			const result = await (options?.progress != null
+				? window.withProgress(
+						{ ...options.progress, title: `Generating changelog with ${model.name}...` },
+						() => promise,
+				  )
+				: promise);
+
+			payload['output.length'] = result?.length;
+			this.container.telemetry.sendEvent('ai/generate', { ...payload, duration: Date.now() - start }, source);
+
+			return result;
+		} catch (ex) {
+			this.container.telemetry.sendEvent(
+				'ai/generate',
+				{
+					...payload,
+					duration: Date.now() - start,
+					...(ex instanceof CancellationError
+						? { 'failed.reason': 'user-cancelled' }
+						: { 'failed.reason': 'error', 'failed.error': String(ex) }),
+				},
+				source,
+			);
+
+			throw ex;
+		}
+	}
+
+	private async getChanges(
+		changesOrRepo: string | string[] | Repository,
 		options?: { cancellation?: CancellationToken; context?: string; progress?: ProgressOptions },
 	): Promise<string | undefined> {
 		let changes: string;
-		if (Array.isArray(changesOrRepoOrPath)) {
-			changes = changesOrRepoOrPath.join('\n');
+		if (typeof changesOrRepo === 'string') {
+			changes = changesOrRepo;
+		} else if (Array.isArray(changesOrRepo)) {
+			changes = changesOrRepo.join('\n');
 		} else {
-			const repository = isRepository(changesOrRepoOrPath)
-				? changesOrRepoOrPath
-				: this.container.git.getRepository(changesOrRepoOrPath);
-			if (repository == null) throw new Error('Unable to find repository');
-
-			let diff = await this.container.git.getDiff(repository.uri, uncommittedStaged);
+			let diff = await this.container.git.getDiff(changesOrRepo.uri, uncommittedStaged);
 			if (!diff?.contents) {
-				diff = await this.container.git.getDiff(repository.uri, uncommitted);
+				diff = await this.container.git.getDiff(changesOrRepo.uri, uncommitted);
 				if (!diff?.contents) throw new Error('No changes to generate a commit message from.');
 			}
 			if (options?.cancellation?.isCancellationRequested) return undefined;
@@ -223,87 +569,85 @@ export class AIProviderService implements Disposable {
 			changes = diff.contents;
 		}
 
-		const model = await this.getModel();
-		if (model == null) return undefined;
-
-		const provider = this._provider!;
-
-		const confirmed = await confirmAIProviderToS(model, this.container.storage);
-		if (!confirmed) return undefined;
-		if (options?.cancellation?.isCancellationRequested) return undefined;
-
-		if (options?.progress != null) {
-			return window.withProgress(options.progress, async () =>
-				provider.generateCommitMessage(model, changes, {
-					cancellation: options?.cancellation,
-					context: options?.context,
-				}),
-			);
-		}
-		return provider.generateCommitMessage(model, changes, {
-			cancellation: options?.cancellation,
-			context: options?.context,
-		});
+		return changes;
 	}
 
 	async explainCommit(
-		repoPath: string | Uri,
-		sha: string,
+		commitOrRevision: GitRevisionReference | GitCommit,
+		sourceContext: { source: Sources; type: TelemetryEvents['ai/explain']['changeType'] },
 		options?: { cancellation?: CancellationToken; progress?: ProgressOptions },
-	): Promise<string | undefined>;
-	async explainCommit(
-		commit: GitRevisionReference | GitCommit,
-		options?: { cancellation?: CancellationToken; progress?: ProgressOptions },
-	): Promise<string | undefined>;
-	async explainCommit(
-		commitOrRepoPath: string | Uri | GitRevisionReference | GitCommit,
-		shaOrOptions?: string | { progress?: ProgressOptions },
-		options?: { cancellation?: CancellationToken; progress?: ProgressOptions },
-	): Promise<string | undefined> {
-		let commit: GitCommit | undefined;
-		if (typeof commitOrRepoPath === 'string' || commitOrRepoPath instanceof Uri) {
-			if (typeof shaOrOptions !== 'string' || !shaOrOptions) throw new Error('Invalid arguments provided');
-
-			commit = await this.container.git.getCommit(commitOrRepoPath, shaOrOptions);
-		} else {
-			if (typeof shaOrOptions === 'string') throw new Error('Invalid arguments provided');
-
-			commit = isCommit(commitOrRepoPath)
-				? commitOrRepoPath
-				: await this.container.git.getCommit(commitOrRepoPath.repoPath, commitOrRepoPath.ref);
-			options = shaOrOptions;
-		}
-		if (commit == null) throw new Error('Unable to find commit');
-
-		const diff = await this.container.git.getDiff(commit.repoPath, commit.sha);
+	): Promise<AIResult | undefined> {
+		const diff = await this.container.git.getDiff(commitOrRevision.repoPath, commitOrRevision.ref);
 		if (!diff?.contents) throw new Error('No changes found to explain.');
 
-		const model = await this.getModel();
+		const { confirmed, model } = await getModelAndConfirmAIProviderToS('diff', this, this.container.storage);
 		if (model == null) return undefined;
 
-		const provider = this._provider!;
+		const payload: TelemetryEvents['ai/explain'] = {
+			type: 'change',
+			changeType: sourceContext.type,
+			'model.id': model.id,
+			'model.provider.id': model.provider.id,
+			'model.provider.name': model.provider.name,
+			'retry.count': 0,
+		};
+		const source: Parameters<TelemetryService['sendEvent']>[2] = { source: sourceContext.source };
 
-		const confirmed = await confirmAIProviderToS(model, this.container.storage);
-		if (!confirmed) return undefined;
+		if (!confirmed) {
+			this.container.telemetry.sendEvent('ai/explain', { ...payload, 'failed.reason': 'user-declined' }, source);
+
+			return undefined;
+		}
+
+		const commit = isCommit(commitOrRevision)
+			? commitOrRevision
+			: await this.container.git.commits(commitOrRevision.repoPath).getCommit(commitOrRevision.ref);
+		if (commit == null) throw new Error('Unable to find commit');
 
 		if (!commit.hasFullDetails()) {
 			await commit.ensureFullDetails();
 			assertsCommitHasFullDetails(commit);
 		}
 
-		if (options?.progress != null) {
-			return window.withProgress(options.progress, async () =>
-				provider.explainChanges(model, commit.message, diff.contents, {
-					cancellation: options?.cancellation,
-				}),
-			);
+		if (options?.cancellation?.isCancellationRequested) {
+			this.container.telemetry.sendEvent('ai/explain', { ...payload, 'failed.reason': 'user-cancelled' }, source);
+
+			return undefined;
 		}
-		return provider.explainChanges(model, commit.message, diff.contents, {
+
+		const promise = this._provider!.explainChanges(model, commit.message, diff.contents, payload, {
 			cancellation: options?.cancellation,
 		});
+
+		const start = Date.now();
+		try {
+			const result = await (options?.progress != null
+				? window.withProgress(options.progress, () => promise)
+				: promise);
+
+			payload['output.length'] = result?.length;
+			this.container.telemetry.sendEvent('ai/explain', { ...payload, duration: Date.now() - start }, source);
+
+			if (result == null) return undefined;
+			return parseResult(result);
+		} catch (ex) {
+			this.container.telemetry.sendEvent(
+				'ai/explain',
+				{
+					...payload,
+					duration: Date.now() - start,
+					...(ex instanceof CancellationError
+						? { 'failed.reason': 'user-cancelled' }
+						: { 'failed.reason': 'error', 'failed.error': String(ex) }),
+				},
+				source,
+			);
+
+			throw ex;
+		}
 	}
 
-	async reset() {
+	async reset(all?: boolean): Promise<void> {
 		let { _provider: provider } = this;
 		if (provider == null) {
 			// If we have no provider, try to get the current model (which will load the provider)
@@ -316,7 +660,9 @@ export class AIProviderService implements Disposable {
 		const cancel: MessageItem = { title: 'Cancel', isCloseAffordance: true };
 
 		let result;
-		if (provider == null) {
+		if (all) {
+			result = resetAll;
+		} else if (provider == null) {
 			result = await window.showInformationMessage(
 				`Do you want to reset all of the stored AI keys?`,
 				{ modal: true },
@@ -355,59 +701,77 @@ export class AIProviderService implements Disposable {
 		}
 	}
 
-	supports(provider: AIProviders | string) {
+	supports(provider: AIProviders | string): boolean {
 		return _supportedProviderTypes.has(provider as AIProviders);
 	}
 
-	async switchModel() {
-		void (await this.getModel({ force: true }));
+	switchModel(): Promise<AIModel | undefined> {
+		return this.getModel({ force: true });
 	}
 }
 
-async function confirmAIProviderToS<Provider extends AIProviders>(
-	model: AIModel<Provider, AIModels<Provider>>,
+async function getModelAndConfirmAIProviderToS(
+	confirmationType: 'data' | 'diff',
+	service: AIProviderService,
 	storage: Storage,
-): Promise<boolean> {
-	const confirmed =
-		storage.get(`confirm:ai:tos:${model.provider.id}`, false) ||
-		storage.getWorkspace(`confirm:ai:tos:${model.provider.id}`, false);
-	if (confirmed) return true;
+): Promise<{ confirmed: boolean; model: AIModel | undefined }> {
+	let model = await service.getModel();
+	while (true) {
+		if (model == null) return { confirmed: false, model: model };
 
-	const accept: MessageItem = { title: 'Continue' };
-	const acceptWorkspace: MessageItem = { title: 'Always for this Workspace' };
-	const acceptAlways: MessageItem = { title: 'Always' };
-	const decline: MessageItem = { title: 'Cancel', isCloseAffordance: true };
-	const result = await window.showInformationMessage(
-		`GitLens experimental AI features require sending a diff of the code changes to ${model.provider.name} for analysis. This may contain sensitive information.\n\nDo you want to continue?`,
-		{ modal: true },
-		accept,
-		acceptWorkspace,
-		acceptAlways,
-		decline,
-	);
+		const confirmed =
+			storage.get(`confirm:ai:tos:${model.provider.id}`, false) ||
+			storage.getWorkspace(`confirm:ai:tos:${model.provider.id}`, false);
+		if (confirmed) return { confirmed: true, model: model };
 
-	if (result === accept) return true;
+		const accept: MessageItem = { title: 'Continue' };
+		const switchModel: MessageItem = { title: 'Switch Model' };
+		const acceptWorkspace: MessageItem = { title: 'Always for this Workspace' };
+		const acceptAlways: MessageItem = { title: 'Always' };
+		const decline: MessageItem = { title: 'Cancel', isCloseAffordance: true };
 
-	if (result === acceptWorkspace) {
-		void storage.storeWorkspace(`confirm:ai:tos:${model.provider.id}`, true);
-		return true;
+		const result = await window.showInformationMessage(
+			`GitLens AI features require sending ${
+				confirmationType === 'data' ? 'data' : 'a diff of the code changes'
+			} to ${
+				model.provider.name
+			} for analysis. This may contain sensitive information.\n\nDo you want to continue?`,
+			{ modal: true },
+			accept,
+			switchModel,
+			acceptWorkspace,
+			acceptAlways,
+			decline,
+		);
+
+		if (result === switchModel) {
+			model = await service.switchModel();
+			continue;
+		}
+
+		if (result === accept) return { confirmed: true, model: model };
+
+		if (result === acceptWorkspace) {
+			void storage.storeWorkspace(`confirm:ai:tos:${model.provider.id}`, true).catch();
+			return { confirmed: true, model: model };
+		}
+
+		if (result === acceptAlways) {
+			void storage.store(`confirm:ai:tos:${model.provider.id}`, true).catch();
+			return { confirmed: true, model: model };
+		}
+
+		return { confirmed: false, model: model };
 	}
-
-	if (result === acceptAlways) {
-		void storage.store(`confirm:ai:tos:${model.provider.id}`, true);
-		return true;
-	}
-
-	return false;
 }
 
-export function getMaxCharacters(model: AIModel, outputLength: number): number {
+export function getMaxCharacters(model: AIModel, outputLength: number, overrideInputTokens?: number): number {
 	const tokensPerCharacter = 3.1;
-	const max = model.maxTokens * tokensPerCharacter - outputLength / tokensPerCharacter;
+	const max = (overrideInputTokens ?? model.maxTokens.input) * tokensPerCharacter - outputLength / tokensPerCharacter;
 	return Math.floor(max - max * 0.1);
 }
 
-export async function getApiKey(
+export async function getOrPromptApiKey(
 	storage: Storage,
 	provider: { id: AIProviders; name: string; validator: (value: string) => boolean; url: string },
 ): Promise<string | undefined> {
@@ -465,8 +829,67 @@ export async function getApiKey(
 
 		if (!apiKey) return undefined;
 
-		void storage.storeSecret(`gitlens.${provider.id}.key`, apiKey);
+		void storage.storeSecret(`gitlens.${provider.id}.key`, apiKey).catch();
 	}
 
 	return apiKey;
+}
+
+function parseResult(result: string): AIResult {
+	result = result.trim();
+	let summary = result.match(/<summary>\s?([\s\S]*?)\s?(<\/summary>|$)/)?.[1]?.trim() ?? '';
+	let body = result.match(/<body>\s?([\s\S]*?)\s?(<\/body>|$)/)?.[1]?.trim() ?? '';
+
+	// If both tags are missing, split the result
+	if (!summary && !body) {
+		return splitMessageIntoSummaryAndBody(result);
+	}
+
+	if (summary && !body) {
+		// If only summary tag is present, use the remaining text as the body
+		body = result.replace(/<summary>[\s\S]*?<\/summary>/, '')?.trim() ?? '';
+		if (!body) {
+			return splitMessageIntoSummaryAndBody(summary);
+		}
+	} else if (!summary && body) {
+		// If only body tag is present, use the remaining text as the summary
+		summary = result.replace(/<body>[\s\S]*?<\/body>/, '').trim() ?? '';
+		if (!summary) {
+			return splitMessageIntoSummaryAndBody(body);
+		}
+	}
+
+	return { summary: summary, body: body };
+}
+
+function splitMessageIntoSummaryAndBody(message: string): AIResult {
+	const index = message.indexOf('\n');
+	if (index === -1) return { summary: message, body: '' };
+
+	return {
+		summary: message.substring(0, index).trim(),
+		body: message.substring(index + 1).trim(),
+	};
+}
+
+export function showDiffTruncationWarning(maxCodeCharacters: number, model: AIModel): void {
+	void window.showWarningMessage(
+		`The diff of the changes had to be truncated to ${formatNumeric(
+			maxCodeCharacters,
+		)} characters to fit within the ${getPossessiveForm(model.provider.name)} limits.`,
+	);
+}
+
+export function showPromptTruncationWarning(maxCodeCharacters: number, model: AIModel): void {
+	void window.showWarningMessage(
+		`The prompt had to be truncated to ${formatNumeric(
+			maxCodeCharacters,
+		)} characters to fit within the ${getPossessiveForm(model.provider.name)} limits.`,
+	);
+}
+
+export function getValidatedTemperature(modelTemperature?: number | null): number | undefined {
+	if (modelTemperature === null) return undefined;
+	if (modelTemperature != null) return modelTemperature;
+	return Math.max(0, Math.min(configuration.get('ai.modelOptions.temperature'), 2));
 }

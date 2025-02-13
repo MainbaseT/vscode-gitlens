@@ -1,35 +1,32 @@
 import type { TextEditor, TextEditorEdit, Uri } from 'vscode';
-import { window } from 'vscode';
 import type { AnnotationContext } from '../annotations/annotationProvider';
 import type { ChangesAnnotationContext } from '../annotations/gutterChangesAnnotationProvider';
-import { Commands } from '../constants';
 import type { Container } from '../container';
 import { showGenericErrorMessage } from '../messages';
-import { command } from '../system/command';
-import { UriComparer } from '../system/comparers';
+import { command } from '../system/-webview/command';
+import { getEditorIfVisible, getOtherVisibleTextEditors, isTrackableTextEditor } from '../system/-webview/vscode';
 import { Logger } from '../system/logger';
-import { isTextEditor } from '../system/utils';
-import { ActiveEditorCommand, EditorCommand } from './base';
+import { ActiveEditorCommand, EditorCommand } from './commandBase';
 
 @command()
 export class ClearFileAnnotationsCommand extends EditorCommand {
 	constructor(private readonly container: Container) {
-		super([Commands.ClearFileAnnotations, Commands.ComputingFileAnnotations]);
+		super(['gitlens.clearFileAnnotations', 'gitlens.computingFileAnnotations']);
 	}
 
-	async execute(editor: TextEditor, edit: TextEditorEdit, uri?: Uri): Promise<void> {
-		// Handle the case where we are focused on a non-editor editor (output, debug console)
-		if (editor != null && !isTextEditor(editor)) {
-			if (uri != null && !UriComparer.equals(uri, editor.document.uri)) {
-				const e = window.visibleTextEditors.find(e => UriComparer.equals(uri, e.document.uri));
-				if (e != null) {
-					editor = e;
-				}
-			}
-		}
+	async execute(editor: TextEditor | undefined, _edit: TextEditorEdit, uri?: Uri): Promise<void> {
+		editor = getValidEditor(editor, uri);
 
 		try {
-			await this.container.fileAnnotations.clear(editor);
+			if (!editor || this.container.fileAnnotations.isInWindowToggle()) {
+				await this.container.fileAnnotations.clear(editor);
+				return;
+			}
+
+			// Clear split editors as though they were linked, because we can't handle the command states effectively
+			await Promise.allSettled(
+				[editor, ...getOtherVisibleTextEditors(editor)].map(e => this.container.fileAnnotations.clear(e)),
+			);
 		} catch (ex) {
 			Logger.error(ex, 'ClearFileAnnotationsCommand');
 			void showGenericErrorMessage('Unable to clear file annotations');
@@ -63,7 +60,7 @@ export type ToggleFileAnnotationCommandArgs =
 @command()
 export class ToggleFileBlameCommand extends ActiveEditorCommand {
 	constructor(private readonly container: Container) {
-		super([Commands.ToggleFileBlame, Commands.ToggleFileBlameInDiffLeft, Commands.ToggleFileBlameInDiffRight]);
+		super(['gitlens.toggleFileBlame', 'gitlens.toggleFileBlameInDiffLeft', 'gitlens.toggleFileBlameInDiffRight']);
 	}
 
 	execute(editor: TextEditor, uri?: Uri, args?: ToggleFileBlameAnnotationCommandArgs): Promise<void> {
@@ -77,7 +74,7 @@ export class ToggleFileBlameCommand extends ActiveEditorCommand {
 @command()
 export class ToggleFileChangesCommand extends ActiveEditorCommand {
 	constructor(private readonly container: Container) {
-		super(Commands.ToggleFileChanges);
+		super('gitlens.toggleFileChanges');
 	}
 
 	execute(editor: TextEditor, uri?: Uri, args?: ToggleFileChangesAnnotationCommandArgs): Promise<void> {
@@ -92,9 +89,9 @@ export class ToggleFileChangesCommand extends ActiveEditorCommand {
 export class ToggleFileHeatmapCommand extends ActiveEditorCommand {
 	constructor(private readonly container: Container) {
 		super([
-			Commands.ToggleFileHeatmap,
-			Commands.ToggleFileHeatmapInDiffLeft,
-			Commands.ToggleFileHeatmapInDiffRight,
+			'gitlens.toggleFileHeatmap',
+			'gitlens.toggleFileHeatmapInDiffLeft',
+			'gitlens.toggleFileHeatmapInDiffRight',
 		]);
 	}
 
@@ -108,19 +105,11 @@ export class ToggleFileHeatmapCommand extends ActiveEditorCommand {
 
 async function toggleFileAnnotations<TArgs extends ToggleFileAnnotationCommandArgs>(
 	container: Container,
-	editor: TextEditor,
+	editor: TextEditor | undefined,
 	uri: Uri | undefined,
 	args: TArgs,
 ): Promise<void> {
-	// Handle the case where we are focused on a non-editor editor (output, debug console)
-	if (editor != null && !isTextEditor(editor)) {
-		if (uri != null && !UriComparer.equals(uri, editor.document.uri)) {
-			const e = window.visibleTextEditors.find(e => UriComparer.equals(uri, e.document.uri));
-			if (e != null) {
-				editor = e;
-			}
-		}
-	}
+	editor = getValidEditor(editor, uri);
 
 	try {
 		args = { type: 'blame', ...(args as any) };
@@ -134,8 +123,53 @@ async function toggleFileAnnotations<TArgs extends ToggleFileAnnotationCommandAr
 			},
 			args.on,
 		));
+
+		// Should we link split editors together??
+		// if (!editor || container.fileAnnotations.isInWindowToggle()) {
+		// 	void (await container.fileAnnotations.toggle(
+		// 		editor,
+		// 		args.type,
+		// 		{
+		// 			selection: args.context?.selection ?? { line: editor?.selection.active.line },
+		// 			...args.context,
+		// 		},
+		// 		args.on,
+		// 	));
+
+		// 	return;
+		// }
+
+		// await Promise.allSettled(
+		// 	[editor, ...getOtherVisibleTextEditors(editor)].map(e =>
+		// 		container.fileAnnotations.toggle(
+		// 			e,
+		// 			args.type,
+		// 			{
+		// 				selection: args.context?.selection ?? { line: e?.selection.active.line },
+		// 				...args.context,
+		// 			},
+		// 			args.on,
+		// 		),
+		// 	),
+		// );
 	} catch (ex) {
 		Logger.error(ex, 'ToggleFileAnnotationsCommand');
 		void showGenericErrorMessage(`Unable to toggle file ${args.type} annotations`);
 	}
+}
+
+function getValidEditor(editor: TextEditor | undefined, uri: Uri | undefined) {
+	// Handle the case where we are focused on a non-editor editor (output, debug console) or focused on another editor, but executing an action on another editor
+	if (editor != null && !isTrackableTextEditor(editor)) {
+		editor = undefined;
+	}
+
+	if (uri != null && (editor == null || editor.document.uri.toString() !== uri.toString())) {
+		const e = getEditorIfVisible(uri);
+		if (e != null) {
+			editor = e;
+		}
+	}
+
+	return editor;
 }
